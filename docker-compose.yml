@@ -1,48 +1,50 @@
 services:
-  api:
-    container_name: flaskApi
-    build:
-      context: .
-      dockerfile: Dockerfile
-    volumes:
-      - ./src:/app/src 
+  web:
+    build: .
     ports:
       - "5000:5000"
-    env_file: ./.env
-    depends_on:
-      - psql
-      - redis
-    networks:
-      - app-network
-
-  psql:
-    container_name: psql
-    image: postgres:16-alpine
-    restart: always
     volumes:
-      - ./pgdata:/var/lib/postgresql/data
-    env_file: ./.env
+      - .:/app
+    env_file: .env
+    environment:
+      - TZ=America/Recife
+    depends_on:
+      - db
+    restart: unless-stopped
     networks:
       - app-network
 
-  redis:
-    container_name: redis
-    image: redis:7-alpine
-    restart: always
+  db:
+    image: postgres:13-alpine
+    container_name: postgres_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: America/Recife
+    ports:
+      - "5432:5432"
     networks:
       - app-network
 
   pgadmin:
-    container_name: pgadmin4
     image: dpage/pgadmin4
-    restart: always
-    env_file: ./.env
+    container_name: pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+      TZ: America/Recife
     ports:
       - "5050:80"
     depends_on:
-      - psql
+      - db
     networks:
       - app-network
+
+volumes:
+  postgres_data:
 
 networks:
   app-network:

@@ -1,24 +1,15 @@
-FROM python:3.9.23-alpine3.21
-
-LABEL maintainer="marciodelinooliveira@gmail.com"
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
-
-RUN apk add --no-cache postgresql-dev build-base
+FROM python:3.7.9-alpine3.12
 
 WORKDIR /app
-COPY src/ /app/src
-COPY requirements.txt /app/
-COPY dotenv_files/ /dotenv_files/
-COPY run.py /app/
 
-RUN python -m venv /venv && \
-    /venv/bin/pip install --upgrade pip && \
-    /venv/bin/pip install -r /app/requirements.txt && \
-    chmod +x /commands.sh
+RUN apk add --no-cache gcc musl-dev postgresql-dev netcat-openbsd
 
-ENV PATH="/venv/bin:/dotenv_files:$PATH"
+RUN mkdir -p /app/migrations
 
-EXPOSE 5000
+COPY . .
 
-CMD ["commands.sh"]
+RUN pip install --upgrade pip && \
+    pip install -r requirements.txt && \
+    chmod +x entrypoint.sh
+
+CMD ["./entrypoint.sh"]

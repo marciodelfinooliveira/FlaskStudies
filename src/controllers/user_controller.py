@@ -13,36 +13,73 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 from functools import wraps
 
-users = Blueprint("users", __name__)
+users = Blueprint("users", __name__, url_prefix="/users")
 
 def jwt_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        print("\n--- Iniciando verificação JWT ---")  # Debug
+        
         token = None
-        if 'Authorization' in request.headers:
-            auth_header = request.headers['Authorization']
-            try:
-                token = auth_header.split(" ")[1]
-            except IndexError:
-                return jsonify({'message': 'O token Bearer está malformado!'}), 401
+        auth_header = request.headers.get('Authorization', '')
+        print(f"Header Authorization: {auth_header}")  # Debug
+        
+        if auth_header.startswith('Bearer '):
+            token = auth_header.split(" ")[1]
+            print(f"Token extraído: {token}")  # Debug
+        else:
+            print("Formato inválido - Falta 'Bearer '")  # Debug
+            return jsonify({
+                'status': 'error',
+                'message': 'Formato de token inválido. Use: Bearer <token>',
+                'code': 401
+            }), 401
 
         if not token:
-            return jsonify({'message': 'Token de autenticação ausente!'}), 401
+            print("Token ausente")  # Debug
+            return jsonify({
+                'status': 'error',
+                'message': 'Token de autenticação ausente!',
+                'code': 401
+            }), 401
 
-        is_blacklisted = BlacklistedToken.query.filter_by(token=token).first()
-        if is_blacklisted:
-            return jsonify({'message': 'Token foi revogado. Por favor, faça login novamente.'}), 401
+        print("Verificando blacklist...")  # Debug
+        if BlacklistedToken.query.filter_by(token=token).first():
+            print("Token na blacklist")  # Debug
+            return jsonify({
+                'status': 'error',
+                'message': 'Token revogado. Faça login novamente.',
+                'code': 401
+            }), 401
 
         try:
-            data = jwt.decode(token, current_app.config['JWT_SECRET_KEY'], algorithms=["HS256"])
+            print("Tentando decodificar token...")  # Debug
+            payload = jwt.decode(
+                token, 
+                current_app.config['JWT_SECRET_KEY'], 
+                algorithms=["HS256"]
+            )
+            print(f"Payload decodificado: {payload}")  # Debug
+            request.user_id = payload['user_id']
+            
         except jwt.ExpiredSignatureError:
-            return jsonify({'message': 'Token expirado!'}), 401
-        except jwt.InvalidTokenError:
-            return jsonify({'message': 'Token inválido!'}), 401
+            print("Token expirado")  # Debug
+            return jsonify({
+                'status': 'error',
+                'message': 'Token expirado!',
+                'code': 401
+            }), 401
+        except Exception as e:
+            print(f"Erro na decodificação: {str(e)}")  # Debug
+            return jsonify({
+                'status': 'error',
+                'message': 'Token inválido!',
+                'code': 401
+            }), 401
 
+        print("Token válido - Acesso permitido")  # Debug
         return f(*args, **kwargs)
     return decorated
-
 
 @users.route('/add', methods = ["POST"])
 def addUser():
@@ -267,31 +304,42 @@ def signin():
             'code': 401
         }), 401
 
-    access_token = jwt.encode(
-        {
-            'user_id': user.id,
-            'exp': datetime.utcnow() + timedelta(minutes=30)
-        },
-        current_app.config['JWT_SECRET_KEY'],
-        algorithm="HS256"
-    )
+    try:
+        access_token = jwt.encode(
+            {
+                'user_id': user.id,
+                'exp': datetime.utcnow() + timedelta(minutes=30)
+            },
+            current_app.config['JWT_SECRET_KEY'],
+            algorithm="HS256"
+        )
+        # Converta para string se necessário
+        access_token = access_token.decode('utf-8') if isinstance(access_token, bytes) else access_token
 
-    refresh_token = jwt.encode(
-        {
-            'user_id': user.id,
-            'exp': datetime.utcnow() + timedelta(hours=2)
-        },
-        current_app.config['JWT_SECRET_KEY'],
-        algorithm="HS256"
-    )
+        refresh_token = jwt.encode(
+            {
+                'user_id': user.id,
+                'exp': datetime.utcnow() + timedelta(hours=2)
+            },
+            current_app.config['JWT_SECRET_KEY'],
+            algorithm="HS256"
+        )
+        refresh_token = refresh_token.decode('utf-8') if isinstance(refresh_token, bytes) else refresh_token
 
-    return jsonify({
-        'status': 'success',
-        'message': 'Login realizado com sucesso!',
-        'code': 200,
-        'access_token': access_token,
-        'refresh_token': refresh_token
-    }), 200
+        return jsonify({
+            'status': 'success',
+            'message': 'Login realizado com sucesso!',
+            'code': 200,
+            'access_token': access_token,
+            'refresh_token': refresh_token
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Erro ao gerar tokens: {str(e)}',
+            'code': 500
+        }), 500
 
 
 @users.route('/refresh', methods=['POST'])
@@ -346,3 +394,18 @@ def logout():
             'message': 'Não foi possível processar a solicitação de logout.',
             'code': 500
         }), 500
+
+
+@users.route('/validate', methods=["POST"])
+def validate_token():
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    
+    try:
+        decoded = jwt.decode(
+            token,
+            current_app.config['JWT_SECRET_KEY'],
+            algorithms=["HS256"]
+        )
+        return jsonify({'valid': True, 'user_id': decoded['user_id']}), 200
+    except Exception as e:
+        return jsonify({'valid': False, 'error': str(e)}), 401
