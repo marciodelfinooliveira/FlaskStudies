@@ -10,6 +10,7 @@ services:
       - TZ=America/Recife
     depends_on:
       - db
+      - redis
     restart: unless-stopped
     networks:
       - app-network
@@ -43,8 +44,26 @@ services:
     networks:
       - app-network
 
+  redis:
+    image: redis:6-alpine
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+
 volumes:
   postgres_data:
+  redis_data:
 
 networks:
   app-network:

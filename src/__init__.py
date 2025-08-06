@@ -4,11 +4,13 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from dotenv import load_dotenv
 from src.config.config import Config
+import redis
 
 load_dotenv()
 
 db = SQLAlchemy()
 migrate = Migrate()
+redis_client = redis.from_url(os.getenv('REDIS_URL'), decode_responses=True)
 
 def create_app():
     app = Flask(__name__)
@@ -28,4 +30,6 @@ def create_app():
     app.register_blueprint(api, url_prefix="/api")
     app.register_blueprint(users, url_prefix="/users")
     
+    app.redis_client = redis_client
+
     return app

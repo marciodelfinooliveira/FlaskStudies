@@ -18,17 +18,13 @@ users = Blueprint("users", __name__, url_prefix="/users")
 def jwt_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        print("\n--- Iniciando verificação JWT ---")  # Debug
         
         token = None
         auth_header = request.headers.get('Authorization', '')
-        print(f"Header Authorization: {auth_header}")  # Debug
         
         if auth_header.startswith('Bearer '):
             token = auth_header.split(" ")[1]
-            print(f"Token extraído: {token}")  # Debug
         else:
-            print("Formato inválido - Falta 'Bearer '")  # Debug
             return jsonify({
                 'status': 'error',
                 'message': 'Formato de token inválido. Use: Bearer <token>',
@@ -36,16 +32,13 @@ def jwt_required(f):
             }), 401
 
         if not token:
-            print("Token ausente")  # Debug
             return jsonify({
                 'status': 'error',
                 'message': 'Token de autenticação ausente!',
                 'code': 401
             }), 401
 
-        print("Verificando blacklist...")  # Debug
         if BlacklistedToken.query.filter_by(token=token).first():
-            print("Token na blacklist")  # Debug
             return jsonify({
                 'status': 'error',
                 'message': 'Token revogado. Faça login novamente.',
@@ -53,31 +46,26 @@ def jwt_required(f):
             }), 401
 
         try:
-            print("Tentando decodificar token...")  # Debug
             payload = jwt.decode(
                 token, 
                 current_app.config['JWT_SECRET_KEY'], 
                 algorithms=["HS256"]
             )
-            print(f"Payload decodificado: {payload}")  # Debug
             request.user_id = payload['user_id']
             
         except jwt.ExpiredSignatureError:
-            print("Token expirado")  # Debug
             return jsonify({
                 'status': 'error',
                 'message': 'Token expirado!',
                 'code': 401
             }), 401
         except Exception as e:
-            print(f"Erro na decodificação: {str(e)}")  # Debug
             return jsonify({
                 'status': 'error',
                 'message': 'Token inválido!',
                 'code': 401
             }), 401
 
-        print("Token válido - Acesso permitido")  # Debug
         return f(*args, **kwargs)
     return decorated
 
@@ -313,7 +301,6 @@ def signin():
             current_app.config['JWT_SECRET_KEY'],
             algorithm="HS256"
         )
-        # Converta para string se necessário
         access_token = access_token.decode('utf-8') if isinstance(access_token, bytes) else access_token
 
         refresh_token = jwt.encode(
