@@ -7,15 +7,18 @@ services:
       - .:/app
     env_file: .env
     environment:
-      - TZ=America/Recife
+      - TZ=${TZ}
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+      kafka:
+        condition: service_healthy
     restart: unless-stopped
     networks:
       - app-network
+      - kafka-network
 
   db:
     image: postgres:13-alpine
@@ -26,7 +29,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      TZ: America/Recife
+      TZ: ${TZ}
     ports:
       - "5432:5432"
     healthcheck:
@@ -44,7 +47,7 @@ services:
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
-      TZ: America/Recife
+      TZ: ${TZ}
     ports:
       - "5050:80"
     depends_on:
@@ -67,22 +70,61 @@ services:
     networks:
       - app-network
 
-
   redis-commander:
     image: rediscommander/redis-commander:latest
     environment:
-      - REDIS_HOSTS=local:redis:6379
+      - REDIS_HOSTS=${REDIS_COMMANDER_HOSTS}
     ports:
       - "8081:8081"
     depends_on:
       - redis
     networks:
       - app-network
+  
+  kafka:
+    image: bitnami/kafka:latest
+    container_name: kafka_broker
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka_data:/bitnami/kafka
+    environment:
+      KAFKA_CFG_NODE_ID: ${KAFKA_CFG_NODE_ID}
+      KAFKA_CFG_PROCESS_ROLES: ${KAFKA_CFG_PROCESS_ROLES}
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: ${KAFKA_CFG_CONTROLLER_QUORUM_VOTERS}
+      KAFKA_CFG_LISTENERS: ${KAFKA_CFG_LISTENERS}
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: ${KAFKA_CFG_CONTROLLER_LISTENER_NAMES}
+      KAFKA_CFG_ADVERTISED_LISTENERS: ${KAFKA_CFG_ADVERTISED_LISTENERS}
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: ${KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP}
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: ${KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE}
+    healthcheck: 
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    networks:
+      - kafka-network
+
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:latest
+    container_name: kafka_ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BROKERS: ${REDPANDA_KAFKA_BROKERS}
+    depends_on:
+      kafka: 
+        condition: service_healthy
+    networks:
+      - kafka-network
 
 volumes:
   postgres_data:
   redis_data:
+  kafka_data:
 
 networks:
   app-network:
+    driver: bridge
+  kafka-network:
     driver: bridge
