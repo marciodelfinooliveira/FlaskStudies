@@ -1,16 +1,15 @@
 from flask import (
     request, 
-    Response, 
-    json, 
     Blueprint, 
     jsonify,
     current_app
     )
 from src import db
-from src.models.user_model import User, BlacklistedToken
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from src.models.user_model import User
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
+import uuid
 from functools import wraps
 
 users = Blueprint("users", __name__, url_prefix="/users")
@@ -18,32 +17,14 @@ users = Blueprint("users", __name__, url_prefix="/users")
 def jwt_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        
         token = None
         auth_header = request.headers.get('Authorization', '')
         
         if auth_header.startswith('Bearer '):
             token = auth_header.split(" ")[1]
-        else:
-            return jsonify({
-                'status': 'error',
-                'message': 'Formato de token inválido. Use: Bearer <token>',
-                'code': 401
-            }), 401
-
+        
         if not token:
-            return jsonify({
-                'status': 'error',
-                'message': 'Token de autenticação ausente!',
-                'code': 401
-            }), 401
-
-        if BlacklistedToken.query.filter_by(token=token).first():
-            return jsonify({
-                'status': 'error',
-                'message': 'Token revogado. Faça login novamente.',
-                'code': 401
-            }), 401
+            return jsonify({'status': 'error', 'message': 'Token de autenticação ausente!', 'code': 401}), 401
 
         try:
             payload = jwt.decode(
@@ -51,20 +32,23 @@ def jwt_required(f):
                 current_app.config['JWT_SECRET_KEY'], 
                 algorithms=["HS256"]
             )
-            request.user_id = payload['user_id']
+            jti = payload['jti']
+            user_id = payload['user_id']
+            
+            is_blacklisted = current_app.redis_client.get(f"blacklist:jti:{jti}")
+            if is_blacklisted:
+                return jsonify({'status': 'error', 'message': 'Token revogado.', 'code': 401}), 401
+
+            is_whitelisted = current_app.redis_client.get(f"whitelist:jti:{jti}")
+            if not is_whitelisted or is_whitelisted != str(user_id):
+                 return jsonify({'status': 'error', 'message': 'Token não reconhecido ou inválido.', 'code': 401}), 401
+            
+            request.user_id = user_id
             
         except jwt.ExpiredSignatureError:
-            return jsonify({
-                'status': 'error',
-                'message': 'Token expirado!',
-                'code': 401
-            }), 401
-        except Exception as e:
-            return jsonify({
-                'status': 'error',
-                'message': 'Token inválido!',
-                'code': 401
-            }), 401
+            return jsonify({'status': 'error', 'message': 'Token expirado!', 'code': 401}), 401
+        except (jwt.InvalidTokenError, KeyError):
+            return jsonify({'status': 'error', 'message': 'Token inválido!', 'code': 401}), 401
 
         return f(*args, **kwargs)
     return decorated
@@ -293,25 +277,40 @@ def signin():
         }), 401
 
     try:
+        access_token_expires_delta = timedelta(minutes=30)
+        refresh_token_expires_delta = timedelta(hours=2)
+        access_jti = str(uuid.uuid4())
+        
+        access_token_payload = {
+            'user_id': user.id,
+            'exp': datetime.now(timezone.utc) + access_token_expires_delta,
+            'iat': datetime.now(timezone.utc),
+            'jti': access_jti,
+            'type': 'access'
+        }
+
         access_token = jwt.encode(
-            {
-                'user_id': user.id,
-                'exp': datetime.utcnow() + timedelta(minutes=30)
-            },
+            access_token_payload,
             current_app.config['JWT_SECRET_KEY'],
             algorithm="HS256"
         )
-        access_token = access_token.decode('utf-8') if isinstance(access_token, bytes) else access_token
+        
+        current_app.redis_client.setex(
+            f"whitelist:jti:{access_jti}", 
+            int(access_token_expires_delta.total_seconds()), 
+            user.id
+        )
 
         refresh_token = jwt.encode(
             {
                 'user_id': user.id,
-                'exp': datetime.utcnow() + timedelta(hours=2)
+                'exp': datetime.now(timezone.utc) + refresh_token_expires_delta,
+                'iat': datetime.now(timezone.utc),
+                'type': 'refresh'
             },
             current_app.config['JWT_SECRET_KEY'],
             algorithm="HS256"
         )
-        refresh_token = refresh_token.decode('utf-8') if isinstance(refresh_token, bytes) else refresh_token
 
         return jsonify({
             'status': 'success',
@@ -320,13 +319,9 @@ def signin():
             'access_token': access_token,
             'refresh_token': refresh_token
         }), 200
-        
+            
     except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': f'Erro ao gerar tokens: {str(e)}',
-            'code': 500
-        }), 500
+        return jsonify({'status': 'error', 'message': f'Erro ao gerar tokens: {str(e)}'}), 500
 
 
 @users.route('/refresh', methods=['POST'])
@@ -357,30 +352,25 @@ def refresh():
 @users.route('/logout', methods=['POST'])
 @jwt_required
 def logout():
-    """
-    Desloga o usuário adicionando o token de acesso atual à blacklist.
-    """
-    
     auth_header = request.headers.get('Authorization')
     token = auth_header.split(" ")[1]
 
     try:
-        blacklisted_token = BlacklistedToken(token=token)
-        db.session.add(blacklisted_token)
-        db.session.commit()
+        payload = jwt.decode(token, current_app.config['JWT_SECRET_KEY'], algorithms=["HS256"])
+        jti = payload['jti']
+        exp_timestamp = payload['exp']
+        remaining_time = exp_timestamp - datetime.now(timezone.utc).timestamp()
         
-        return jsonify({
-            'status': 'success',
-            'message': 'Logout realizado com sucesso.',
-            'code': 200
-        }), 200
+        if remaining_time > 0:
+            current_app.redis_client.setex(f"blacklist:jti:{jti}", int(remaining_time), "revoked")
+        
+        current_app.redis_client.delete(f"whitelist:jti:{jti}")
+        
+        return jsonify({'status': 'success', 'message': 'Logout realizado com sucesso.', 'code': 200}), 200
+    except (jwt.InvalidTokenError, KeyError) as e:
+        return jsonify({'status': 'error', 'message': 'Token inválido ou malformado.'}), 401
     except Exception as e:
-        db.session.rollback()
-        return jsonify({
-            'status': 'error',
-            'message': 'Não foi possível processar a solicitação de logout.',
-            'code': 500
-        }), 500
+        return jsonify({'status': 'error', 'message': 'Não foi possível processar o logout.'}), 500
 
 
 @users.route('/validate', methods=["POST"])
