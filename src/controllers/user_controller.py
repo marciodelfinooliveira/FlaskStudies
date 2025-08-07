@@ -1,5 +1,6 @@
 from flask import (
     request, 
+    json,
     Blueprint, 
     jsonify,
     current_app
@@ -11,6 +12,28 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 import uuid
 from functools import wraps
+import smtplib
+from email.message import EmailMessage
+from kafka import KafkaConsumer
+import time
+from dotenv import load_dotenv
+from threading import Thread
+import logging
+import os
+
+if not os.path.exists('logs'):
+    os.makedirs('logs')
+
+logging.basicConfig(
+    filename='logs/app.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+
+load_dotenv()
 
 users = Blueprint("users", __name__, url_prefix="/users")
 
@@ -92,6 +115,18 @@ def addUser():
         db.session.add(user)
 
         db.session.commit()
+
+        user_event = {
+            'event_type': 'USER_REGISTERED',
+            'user_id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'timestamp_utc': datetime.now(timezone.utc).isoformat()
+        }
+
+        current_app.kafka_producer.send('user-lifecycle', value=user_event)
+        current_app.kafka_producer.flush()
+
         return jsonify({
             'status': 'success',
             'message': 'Usuário adicionado com sucesso!',
@@ -386,3 +421,104 @@ def validate_token():
         return jsonify({'valid': True, 'user_id': decoded['user_id']}), 200
     except Exception as e:
         return jsonify({'valid': False, 'error': str(e)}), 401
+    
+
+def start_kafka_consumer(app):
+    """Inicia o consumidor Kafka em uma thread separada"""
+
+    def run_consumer():
+        with app.app_context():
+            while True:
+                try:
+                    consumer = app.kafka_consumer
+                    app.logger.info(f"Aguardando eventos do tópico '{app.config['KAFKA_TOPIC']}'...")
+                    
+                    for message in consumer:
+                        event = message.value
+                        app.logger.info(f"Evento recebido: {event}")
+                        if event.get('event_type') == 'USER_REGISTERED':
+                            send_welcome_email(event)
+                
+                except Exception as e:
+                    app.logger.error(f"Erro no consumidor Kafka: {str(e)}", exc_info=True)
+                    time.sleep(3)
+
+    thread = Thread(target=run_consumer)
+    thread.daemon = True
+    thread.start()
+
+
+def send_welcome_email(user_data, app=None):
+    """Função para construir e enviar o e-mail de boas-vindas."""
+    
+    if app is None:
+        app = current_app
+        
+    try:
+        recipient_email = user_data.get('email')
+        username = user_data.get('username')
+
+        if not all([recipient_email, username]):
+            app.logger.error("Dados insuficientes no evento para enviar e-mail.")
+            return
+
+        app.logger.info(f"Preparando e-mail para {recipient_email}...")
+        
+        msg = EmailMessage()
+        msg['Subject'] = f"Bem-vindo(a) à nossa plataforma, {username}!"
+        msg['From'] = app.config['SMTP_SENDER']
+        msg['To'] = recipient_email
+        msg.set_content(
+            f"Olá {username},\n\nSeu cadastro foi realizado com sucesso!\n\n"
+            "Estamos muito felizes em ter você conosco.\n\n"
+            "Atenciosamente,\nA Equipe do Projeto."
+        )
+
+        app.logger.info(f"Conectando ao SMTP {app.config['SMTP_HOST']}:{app.config['SMTP_PORT']}...")
+        
+        with smtplib.SMTP(app.config['SMTP_HOST'], app.config['SMTP_PORT']) as s:
+            app.logger.info("Conexão SMTP estabelecida, enviando e-mail...")
+            s.send_message(msg)
+            app.logger.info(f"E-mail enviado com sucesso para {recipient_email}")
+
+    except Exception as e:
+        app.logger.error(f"Falha ao enviar e-mail: {str(e)}", exc_info=True)
+        
+
+@users.route('/start-email-consumer', methods=['POST'])
+def start_email_consumer():
+
+    try:
+        if not hasattr(current_app, 'kafka_consumer') or current_app.kafka_consumer is None:
+            current_app.kafka_consumer = KafkaConsumer(
+                current_app.config['KAFKA_TOPIC'],
+                group_id=current_app.config['KAFKA_GROUP_ID'],
+                bootstrap_servers=current_app.config['KAFKA_BROKERS'],
+                value_deserializer=lambda v: json.loads(v.decode('utf-8')),
+                auto_offset_reset='earliest',
+                enable_auto_commit=True,
+                session_timeout_ms=6000,
+                heartbeat_interval_ms=2000
+            )
+            
+            start_kafka_consumer(current_app._get_current_object())  # Passa a aplicação Flask
+            
+            return jsonify({
+                'status': 'success',
+                'message': 'Consumidor de e-mails iniciado com sucesso!',
+                'code': 200
+            }), 200
+        else:
+            return jsonify({
+                'status': 'info',
+                'message': 'Consumidor de e-mails já está em execução.',
+                'code': 200
+            }), 200
+            
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Não foi possível iniciar o consumidor de e-mails: {str(e)}',
+            'code': 500
+        }), 500
+
